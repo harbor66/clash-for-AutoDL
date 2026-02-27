@@ -23,6 +23,7 @@
 - [x] 做了一些适配，适用于AutoDL平台。
 - [x] 脚本进行了防呆措施，可自动处理常见错误。
 - [x] 一次配置，永远起效，每打开一个新的shell，都会自动启动Clash。
+- [x] 支持下载Clash配置(本fork特性)
 
 <br>
 
@@ -34,12 +35,12 @@
 
 # 使用须知
 
-- 使用过程中如遇到问题，请优先查已有的 [issues](https://github.com/VocabVictor/clash-for-AutoDL/issues?q=is%3Aissue+is%3Aclosed)。(你在网页上看不到issue或者issue很少，是因为部分issue我认为已经解决，被关闭了，请在issue中搜索关键字，或者在issue下留言。)
+- 使用过程中如遇到问题，请优先查已有的 [issues](https://github.com/harbor66/clash-for-AutoDL/issues?q=is%3Aissue+is%3Aclosed)。(你在网页上看不到issue或者issue很少，是因为部分issue我认为已经解决，被关闭了，请在issue中搜索关键字，或者在issue下留言。)
 - 在进行issues提交前，请替换提交内容中是敏感信息（例如：订阅地址）。
 - 此项目不提供任何订阅信息，请自行准备Clash订阅地址。
 - 运行前请手动更改`.env`文件中的`CLASH_URL`变量值，否则无法正常运行。
 
-> **注意**：当你在使用此项目时，遇到任何无法独自解决的问题请优先前往 [issues](https://github.com/VocabVictor/clash-for-AutoDL/issues?q=is%3Aissue+is%3Aclosed) 寻找解决方法。由于空闲时间有限，后续将不再对Issues中 "已经解答"、"已有解决方案" 的问题进行重复性的回答。
+> **注意**：当你在使用此项目时，遇到任何无法独自解决的问题请优先前往 [issues](https://github.com/harbor66/clash-for-AutoDL/issues?q=is%3Aissue+is%3Aclosed) 寻找解决方法。由于空闲时间有限，后续将不再对Issues中 "已经解答"、"已有解决方案" 的问题进行重复性的回答。
 
 <br>
 
@@ -50,13 +51,17 @@
 下载项目
 
 ```bash
-git clone https://github.com/VocabVictor/clash-for-AutoDL.git
+git clone https://github.com/harbor66/clash-for-AutoDL.git
 ```
 
 或者尝试kgithub(GitHub镜像站)下载
 
 ```bash
-git clone https://kkgithub.com/VocabVictor/clash-for-AutoDL.git
+git clone https://kkgithub.com/harbor66/clash-for-AutoDL.git
+```
+
+```bash
+git clone https://ghfast.top/https://github.com/harbor66/clash-for-AutoDL.git
 ```
 
 ![1.png](https://s2.loli.net/2024/06/20/8e4VzyTYZSGhPsC.png)
@@ -102,7 +107,8 @@ apt-get install lsof
 
 ```bash
 source ./start.sh
-
+```
+```bash
 配置文件已存在，无需下载。
 配置文件格式正确，无需转换。
 
@@ -129,7 +135,8 @@ Secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ```bash
 lsof -i -P -n | grep LISTEN | grep -E ':6006|:789[0-9]'
-
+```
+```bash
 tcp        0      0 127.0.0.1:6006          0.0.0.0:*               LISTEN     
 tcp6       0      0 :::7890                 :::*                    LISTEN     
 tcp6       0      0 :::7891                 :::*                    LISTEN     

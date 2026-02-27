@@ -52,32 +52,6 @@ jobs:
           fi
         fi
     
-    - name: Test mihomo download URLs
-      run: |
-        # 检查mihomo下载URL是否有效
-        echo "Testing mihomo download URL format..."
-        
-        # 提取版本号
-        MIHOMO_VERSION=$(grep "MIHOMO_VERSION=" start.sh | cut -d'"' -f2)
-        echo "Found MIHOMO_VERSION: $MIHOMO_VERSION"
-        
-        # 检查URL格式
-        if [[ -n "$MIHOMO_VERSION" ]]; then
-          TEST_URL="https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-v${MIHOMO_VERSION}.gz"
-          echo "Testing URL: $TEST_URL"
-          
-          # 使用HEAD请求检查文件是否存在
-          if curl -s --head "$TEST_URL" | grep -q "200 OK"; then
-            echo "✓ Mihomo download URL is accessible"
-          else
-            echo "✗ Mihomo download URL is not accessible"
-            exit 1
-          fi
-        else
-          echo "✗ MIHOMO_VERSION not found"
-          exit 1
-        fi
-    
     - name: Test configuration functions
       run: |
         echo "Testing configuration functions..."

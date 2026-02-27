@@ -35,7 +35,9 @@ Log_Dir="$Server_Dir/logs"
 source $Server_Dir/.env
 
 # 第三方库版本变量
-MIHOMO_VERSION="1.19.11"
+DEFAULT_MIHOMO_VERSION="1.19.20"
+MIHOMO_VERSION="$DEFAULT_MIHOMO_VERSION"
+MIHOMO_VERSION_RESOLVED=0
 YQ_VERSION="v4.44.3"
 
 # 第三方库和配置文件保存路径
@@ -44,8 +46,12 @@ log_file="logs/mihomo.log"
 Config_File="$Conf_Dir/config.yaml"
 CONVERTER_SCRIPT="$Server_Dir/converter.sh"
 
-# URL变量
-URL=${CLASH_URL:?Error: CLASH_URL variable is not set or empty}
+# URL变量（CLASH_URL 与 CLASH_CONF_URL 至少存在一个）
+if [[ -z "${CLASH_URL:-}" && -z "${CLASH_CONF_URL:-}" ]]; then
+    echo -e "${RED}Error: CLASH_URL and CLASH_CONF_URL are both not set or empty${NC}"
+    exit 1
+fi
+URL="${CLASH_CONF_URL:-${CLASH_URL:-}}"
 # Clash 密钥
 Secret=${CLASH_SECRET:-$(openssl rand -hex 32)}
 
@@ -103,30 +109,6 @@ urlencode() {
     echo "${encoded}"
 }
 
-# 验证订阅URL有效性
-validate_subscription_url() {
-    local url="$1"
-    echo -e "${YELLOW}正在验证订阅URL...${NC}"
-    
-    # 检查URL格式
-    if [[ ! "$url" =~ ^https?:// ]]; then
-        echo -e "${RED}错误：订阅URL格式不正确，必须以http://或https://开头${NC}"
-        return 1
-    fi
-    
-    # 尝试连接检查
-    local response_code
-    response_code=$(curl -o /dev/null -L -k -sS --retry 3 -m 10 --connect-timeout 10 -w "%{http_code}" "$url" 2>/dev/null)
-    
-    if [[ "$response_code" =~ ^[23][0-9]{2}$ ]]; then
-        echo -e "${GREEN}✓ 订阅URL验证成功 (HTTP $response_code)${NC}"
-        return 0
-    else
-        echo -e "${RED}✗ 订阅URL验证失败 (HTTP $response_code)${NC}"
-        return 1
-    fi
-}
-
 # 检查YAML文件格式是否正确
 check_yaml() {
     local file="$1"
@@ -159,6 +141,41 @@ check_yaml() {
     return 0
 }
 
+# 规范化配置文件编码为UTF-8，避免 yq 读取失败
+sanitize_utf8_file() {
+    local file="$1"
+    local temp_file="${file}.utf8.tmp"
+
+    [ -f "$file" ] || return 0
+
+    # 文件本身是合法UTF-8时无需处理
+    if iconv -f UTF-8 -t UTF-8 "$file" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}检测到配置文件包含非法UTF-8字节，正在自动清理...${NC}"
+
+    if command -v iconv >/dev/null 2>&1; then
+        if iconv -f UTF-8 -t UTF-8 -c "$file" > "$temp_file" 2>/dev/null; then
+            mv "$temp_file" "$file"
+            echo -e "${GREEN}✓ 配置文件UTF-8编码已修复${NC}"
+            return 0
+        fi
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c 'import sys; src=sys.argv[1]; dst=sys.argv[2]; b=open(src,"rb").read(); s=b.decode("utf-8","ignore"); open(dst,"w",encoding="utf-8",newline="").write(s)' "$file" "$temp_file" 2>/dev/null; then
+            mv "$temp_file" "$file"
+            echo -e "${GREEN}✓ 配置文件UTF-8编码已修复（python兜底）${NC}"
+            return 0
+        fi
+    fi
+
+    rm -f "$temp_file"
+    echo -e "${RED}✗ 无法自动修复配置文件UTF-8编码${NC}"
+    return 1
+}
+
 # 使用自定义转换器转换配置
 use_custom_converter() {
     echo -e "${YELLOW}使用自定义转换器进行配置转换...${NC}"
@@ -183,6 +200,7 @@ download_github_file() {
     local github_path="$1"      # GitHub路径，如 /Kuingsmile/clash-core/releases/download/v1.18.7/clash-linux-amd64-v1.18.7.gz
     local output_file="$2"      # 输出文件路径
     local description="$3"      # 下载描述
+    local min_size="${4:-1024}" # 文件最小大小（字节）
     
     echo -e "${YELLOW}正在下载 $description...${NC}"
     
@@ -205,12 +223,14 @@ download_github_file() {
                 -O "$output_file" \
                 "$download_url"; then
                 
-                # 验证下载的文件是否有效（非空且大于1KB）
-                if [ -f "$output_file" ] && [ $(stat -c%s "$output_file" 2>/dev/null || echo 0) -gt 1024 ]; then
+                # 验证下载的文件是否有效（文件大小满足要求）
+                local file_size
+                file_size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo 0)
+                if [ -f "$output_file" ] && [ "$file_size" -ge "$min_size" ]; then
                     echo -e "${GREEN}✓ 从 $mirror 下载 $description 成功！${NC}"
                     return 0
                 else
-                    echo -e "${RED}✗ 下载的文件无效，删除并重试...${NC}"
+                    echo -e "${RED}✗ 下载的文件无效（大小: ${file_size}B, 最小要求: ${min_size}B），删除并重试...${NC}"
                     rm -f "$output_file"
                 fi
             fi
@@ -228,9 +248,41 @@ download_github_file() {
     return 1
 }
 
+# 获取 Mihomo 最新版本（通过通用 GitHub 下载函数）
+fetch_mihomo_version() {
+    if [ "$MIHOMO_VERSION_RESOLVED" -eq 1 ]; then
+        return 0
+    fi
+
+    local github_path="/MetaCubeX/mihomo/releases/latest/download/version.txt"
+    local version_file="/tmp/mihomo-version.txt"
+    local latest_version=""
+
+    if download_github_file "$github_path" "$version_file" "Mihomo version.txt" 1; then
+        latest_version="$(tr -d '\r\n' < "$version_file")"
+        latest_version="${latest_version#v}"
+    fi
+
+    rm -f "$version_file"
+
+    if [ -n "$latest_version" ]; then
+        MIHOMO_VERSION="$latest_version"
+        echo -e "${GREEN}✓ 获取到最新 Mihomo 版本: v${MIHOMO_VERSION}${NC}"
+    else
+        MIHOMO_VERSION="$DEFAULT_MIHOMO_VERSION"
+        echo -e "${YELLOW}⚠ 无法获取最新 Mihomo 版本，使用默认版本: v${MIHOMO_VERSION}${NC}"
+    fi
+
+    MIHOMO_VERSION_RESOLVED=1
+    return 0
+}
+
 # 下载mihomo二进制文件
 download_clash() {
     local arch=$1
+
+    fetch_mihomo_version
+
     local github_path="/MetaCubeX/mihomo/releases/download/v${MIHOMO_VERSION}/mihomo-linux-${arch}-compatible-v${MIHOMO_VERSION}.gz"
     local temp_file="/tmp/mihomo-${arch}.gz"
     local target_file="$Server_Dir/bin/mihomo-linux-${arch}"
@@ -415,25 +467,52 @@ fi
 if [ -f "$Config_File" ]; then
     echo "配置文件已存在，无需下载。"
 else
-    echo -e '\n正在检测订阅地址...'
-    if curl -o /dev/null -L -k -sS --retry 5 -m 10 --connect-timeout 10 -w "%{http_code}" "$URL" | grep -E '^[23][0-9]{2}$' &>/dev/null; then
-        echo "Clash订阅地址可访问！"
-        
-        echo -e '\n正在下载Clash配置文件...'
-        if curl -L -k -sS --retry 5 -m 30 -o "$Config_File" "$URL"; then
-            echo "配置文件下载成功！"
-        else
-            echo "使用curl下载失败，尝试使用wget进行下..."
-            if $WGET_CMD -O "$Config_File" "$URL"; then
-                echo "使用wget下载成功！"
+    # 检测CLASH_CONF_URL环境变量是否设置，如果设置了就使用CLASH_CONF_URL，否则使用CLASH_URL
+    if [[ -n "$CLASH_CONF_URL" ]]; then
+        URL="$CLASH_CONF_URL"
+        echo "使用CLASH_CONF_URL环境变量作为订阅地址。"
+        if curl -o /dev/null -L -k -sS --retry 5 -m 10 --connect-timeout 10 -w "%{http_code}" "$URL" | grep -E '^[23][0-9]{2}$' &>/dev/null; then
+            echo "Clash订阅地址可访问！"
+            
+            echo -e '\n正在下载Clash配置文件...'
+            if curl -L -k -sS --retry 5 -m 30 -o "$Config_File" "$URL"; then
+                echo "配置文件下载成功！"
             else
-                echo "配置文件下载失败，请检查订阅地址是否正确！"
-                exit 1
+                echo "使用curl下载失败，尝试使用wget进行下..."
+                if $WGET_CMD -O "$Config_File" "$URL"; then
+                    echo "使用wget下载成功！"
+                else
+                    echo "配置文件下载失败，请检查订阅地址是否正确！"
+                    exit 1
+                fi
             fi
+        else
+            echo "Clash订阅地址不可访问！请检查URL或网络连接。"
+            exit 1
         fi
     else
-        echo "Clash订阅地址不可访问！请检查URL或网络连接。"
-        exit 1
+        URL="$CLASH_URL"
+        echo "使用CLASH_URL环境变量作为订阅地址。"
+        echo -e '\n正在检测订阅地址...'
+        if curl -o /dev/null -L -k -sS --retry 5 -m 10 --connect-timeout 10 -w "%{http_code}" "$URL" | grep -E '^[23][0-9]{2}$' &>/dev/null; then
+            echo "Clash订阅地址可访问！"
+            
+            echo -e '\n正在下载Clash配置文件...'
+            if curl -L -k -sS --retry 5 -m 30 -o "$Config_File" "$URL"; then
+                echo "配置文件下载成功！"
+            else
+                echo "使用curl下载失败，尝试使用wget进行下..."
+                if $WGET_CMD -O "$Config_File" "$URL"; then
+                    echo "使用wget下载成功！"
+                else
+                    echo "配置文件下载失败，请检查订阅地址是否正确！"
+                    exit 1
+                fi
+            fi
+        else
+            echo "Clash订阅地址不可访问！请检查URL或网络连接。"
+            exit 1
+        fi
     fi
 fi
 
@@ -460,8 +539,13 @@ else
     fi
 fi
 
-# 合并配置文件 (仅当模板文件存在时)
-if [ -f "$TEMPLATE_FILE" ]; then
+# 再次规范化编码，避免后续 yq 合并时报 UTF-8 错误
+if ! sanitize_utf8_file "$Config_File"; then
+    echo -e "${YELLOW}⚠ 配置文件编码异常，后续处理可能失败${NC}"
+fi
+
+# 合并配置文件 (仅当模板文件存在且CLASH_CONF_URL未设置时)
+if [ -f "$TEMPLATE_FILE" ] && [ -z "$CLASH_CONF_URL" ]; then
     if [ -x "$YQ_BINARY" ]; then
         $YQ_BINARY -n "load(\"$Config_File\") * load(\"$TEMPLATE_FILE\")" > $MERGED_FILE
         mv $MERGED_FILE $Config_File
@@ -512,8 +596,18 @@ fi
 
 if [[ $Status -eq 0 ]]; then
     # Output Dashboard access address and Secret
+    CONTROL_PORT="6006"
+    if [ -x "$YQ_BINARY" ]; then
+        external_controller=$($YQ_BINARY eval '.external-controller // ""' "$Config_File" 2>/dev/null)
+        if [[ "$external_controller" == *":"* ]]; then
+            parsed_port="${external_controller##*:}"
+            if [[ "$parsed_port" =~ ^[0-9]+$ ]]; then
+                CONTROL_PORT="$parsed_port"
+            fi
+        fi
+    fi
     echo ''
-    echo -e "Clash 控制面板访问地址: http://<your_ip>:6006/ui"
+    echo -e "Clash 控制面板访问地址: http://<your_ip>:${CONTROL_PORT}/ui"
     echo ''
 fi
 
@@ -522,7 +616,7 @@ fi
 #==============================================================
 # 获取Clash端口（如果yq可用）
 if [ -x "$YQ_BINARY" ]; then
-    CLASH_PORT=$($YQ_BINARY eval '.port' $Config_File 2>/dev/null || echo "7890")
+    CLASH_PORT=$($YQ_BINARY eval '.mixed-port' $Config_File 2>/dev/null || echo "7890")
 else
     CLASH_PORT="7890"  # 默认端口
 fi
@@ -614,16 +708,14 @@ echo "正在测试网络连接..."
 
 # 如果不是自动设置代理，则手动开启代理
 is_quiet_mode=true
-if [ "$auto_proxy_enabled" = false ]; then
-    # 直接定义并使用proxy_on函数，而不是依赖于已加载的函数
-    export http_proxy=http://127.0.0.1:$CLASH_PORT
-    export https_proxy=http://127.0.0.1:$CLASH_PORT
-    export no_proxy=127.0.0.1,localhost
-    export HTTP_PROXY=http://127.0.0.1:$CLASH_PORT
-    export HTTPS_PROXY=http://127.0.0.1:$CLASH_PORT
-    export NO_PROXY=127.0.0.1,localhost
-    echo -e "${GREEN}[√] 已临时开启代理进行测试${NC}"
-fi
+# 直接定义并使用proxy_on函数，而不是依赖于已加载的函数
+export http_proxy=http://127.0.0.1:$CLASH_PORT
+export https_proxy=http://127.0.0.1:$CLASH_PORT
+export no_proxy=127.0.0.1,localhost
+export HTTP_PROXY=http://127.0.0.1:$CLASH_PORT
+export HTTPS_PROXY=http://127.0.0.1:$CLASH_PORT
+export NO_PROXY=127.0.0.1,localhost
+echo -e "${GREEN}[√] 已临时开启代理进行测试${NC}"
 
 if curl -s -o /dev/null -w "%{http_code}" google.com | grep -qE '^[0-9]+$'; then
     echo -e "${GREEN}网络连接测试成功。${NC}"

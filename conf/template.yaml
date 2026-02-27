@@ -21,6 +21,13 @@ dns:
 
 # Proxies and proxy groups will be inserted here
 
+proxy-groups:
+    - name: 'Auto'
+      type: url-test
+      include-all: true
+      exclude-types: "direct"
+      url: 'https://www.gstatic.com/generate_204'
+      interval: 300
 rules:
     - 'DOMAIN-SUFFIX,steamcontent.com,DIRECT'
     - 'DOMAIN-SUFFIX,steamstatic.com,DIRECT'
@@ -49,3 +56,4 @@ rules:
     - 'IP-CIDR,185.25.182.0/23,DIRECT'
     - 'IP-CIDR,208.78.164.0/22,DIRECT'
     - 'GEOIP,CN,DIRECT'
+    - 'MATCH,Auto'

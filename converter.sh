@@ -37,57 +37,132 @@ decode_base64_url() {
         python3 -c "import base64; print(base64.b64decode('$input').decode('utf-8', errors='ignore'))" 2>/dev/null && return 0
     fi
     
-    # 备用方案使用base64命令
-    echo "$input" | base64 -d 2>/dev/null || echo ""
+    # 备用方案使用base64命令，并尽量清洗为有效UTF-8
+    if command -v iconv >/dev/null 2>&1; then
+        echo "$input" | base64 -d 2>/dev/null | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || echo ""
+    else
+        echo "$input" | base64 -d 2>/dev/null || echo ""
+    fi
+}
+
+# URL解码
+url_decode() {
+    local input="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "import urllib.parse; import sys; print(urllib.parse.unquote(sys.argv[1]))" "$input" 2>/dev/null && return 0
+    fi
+    printf '%b' "${input//%/\\x}" 2>/dev/null || echo "$input"
+}
+
+# YAML单引号转义
+yaml_escape_single() {
+    local input="$1"
+    echo "${input//\'/\'\'}"
 }
 
 # 解析SS链接
 parse_ss() {
     local ss_url="$1"
-    local ss_content=${ss_url#ss://}
-    
-    # 分离base64部分和服务器部分: base64@server:port#name
-    local base64_part=$(echo "$ss_content" | cut -d@ -f1)
-    local server_part=$(echo "$ss_content" | cut -d@ -f2 | cut -d# -f1)
-    local name_part=$(echo "$ss_content" | cut -d# -f2)
-    
-    # 解码base64部分 (method:password)
-    local decoded=$(decode_base64_url "$base64_part")
-    
-    if [ -z "$decoded" ]; then
-        echo "# Failed to decode SS link"
+    local ss_content="${ss_url#ss://}"
+    local name_part=""
+    local query_part=""
+    local userinfo=""
+    local server_part=""
+    local decoded_full=""
+    local decoded_userinfo=""
+    local method=""
+    local password=""
+    local server=""
+    local port=""
+    local name=""
+
+    # 分离 #name
+    if [[ "$ss_content" == *"#"* ]]; then
+        name_part="${ss_content#*#}"
+        ss_content="${ss_content%%#*}"
+    fi
+
+    # 分离 ?query
+    if [[ "$ss_content" == *"?"* ]]; then
+        query_part="${ss_content#*\?}"
+        ss_content="${ss_content%%\?*}"
+    fi
+
+    # 支持：
+    # 1) ss://method:password@server:port
+    # 2) ss://base64(method:password@server:port)
+    # 3) ss://base64(method:password)@server:port
+    if [[ "$ss_content" == *"@"* ]]; then
+        userinfo="${ss_content%@*}"
+        server_part="${ss_content##*@}"
+    else
+        decoded_full="$(decode_base64_url "$ss_content")"
+        if [[ -z "$decoded_full" || "$decoded_full" != *"@"* ]]; then
+            echo "# Failed to parse SS link"
+            return 1
+        fi
+        userinfo="${decoded_full%@*}"
+        server_part="${decoded_full##*@}"
+    fi
+
+    # userinfo 可能是明文 method:password，也可能是base64(method:password)
+    if [[ "$userinfo" =~ ^[A-Za-z0-9+/=_-]+$ && "$userinfo" != *":"* ]]; then
+        decoded_userinfo="$(decode_base64_url "$userinfo")"
+    else
+        decoded_userinfo="$(url_decode "$userinfo")"
+    fi
+
+    if [[ -z "$decoded_userinfo" || "$decoded_userinfo" != *":"* ]]; then
+        echo "# Failed to parse SS method/password"
         return 1
     fi
-    
-    # 解析格式: method:password
-    local method=$(echo "$decoded" | cut -d: -f1)
-    local password=$(echo "$decoded" | cut -d: -f2-)
-    
-    # 解析服务器和端口
-    local server=$(echo "$server_part" | cut -d: -f1)
-    local port=$(echo "$server_part" | cut -d: -f2)
-    
+
+    method="${decoded_userinfo%%:*}"
+    password="${decoded_userinfo#*:}"
+
+    # 解析服务器和端口（兼容 [IPv6]:port）
+    if [[ "$server_part" =~ ^\[([0-9a-fA-F:]+)\]:(.+)$ ]]; then
+        server="[${BASH_REMATCH[1]}]"
+        port="${BASH_REMATCH[2]}"
+    else
+        server="${server_part%:*}"
+        port="${server_part##*:}"
+    fi
+
+    if [[ -z "$server" || -z "$port" || ! "$port" =~ ^[0-9]+$ ]]; then
+        echo "# Failed to parse SS server/port"
+        return 1
+    fi
+
     # 解析节点名称（URL解码）
-    local name="SS-${server}-${port}"
+    name="SS-${server}-${port}"
     if [ -n "$name_part" ]; then
-        # 使用python进行URL解码，处理特殊字符
-        if command -v python3 >/dev/null 2>&1; then
-            local decoded_name=$(python3 -c "import urllib.parse; import sys; print(urllib.parse.unquote(sys.argv[1]).strip())" "$name_part" 2>/dev/null)
-            if [ -n "$decoded_name" ]; then
-                name="$decoded_name"
-            fi
+        local decoded_name
+        decoded_name="$(url_decode "$name_part" | tr -d '\r\n')"
+        if [ -n "$decoded_name" ]; then
+            name="$decoded_name"
         fi
     fi
-    
+
     # 检查重复名称
-    if [ -f "$TEMP_NAME_FILE" ] && grep -q "^$name$" "$TEMP_NAME_FILE"; then
+    if [ -f "$TEMP_NAME_FILE" ] && grep -Fxq "$name" "$TEMP_NAME_FILE"; then
         DUPLICATE_COUNT=$((DUPLICATE_COUNT + 1))
         name="${name}-${DUPLICATE_COUNT}"
     fi
     echo "$name" >> "$TEMP_NAME_FILE"
-    
+
+    local name_yaml method_yaml password_yaml server_yaml extra_flags=""
+    name_yaml="$(yaml_escape_single "$name")"
+    method_yaml="$(yaml_escape_single "$method")"
+    password_yaml="$(yaml_escape_single "$password")"
+    server_yaml="$(yaml_escape_single "$server")"
+
+    if [ "$tfo_enabled" = true ]; then
+        extra_flags=", tfo: true, fast-open: true"
+    fi
+
     # 输出Clash格式配置（紧凑格式）
-    echo "    - { name: '$name', type: ss, server: $server, port: $port, cipher: $method, password: $password, udp: true }"
+    echo "    - { name: '$name_yaml', type: ss, server: '$server_yaml', port: $port, cipher: '$method_yaml', password: '$password_yaml', udp: true${extra_flags} }"
     
     PROXY_COUNT=$((PROXY_COUNT + 1))
 }
@@ -438,7 +513,7 @@ EOF
         
         # 生成代理组配置（紧凑格式，符合参考配置）
         echo "" >> "$output_file"
-        echo "proxy-groups:" >> "$output_file"
+        # echo "proxy-groups:" >> "$output_file"
         
         # 函数：智能引用代理名称
         format_proxy_name() {
