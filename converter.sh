@@ -161,8 +161,17 @@ parse_ss() {
         extra_flags=", tfo: true, fast-open: true"
     fi
 
+    # 输出Clash格式配置
+    cat << EOF
+  - name: '$name_yaml'
+    type: ss
+    server: '$server_yaml'
+    port: $port
+    cipher: '$method_yaml'
+    password: '$password_yaml'
+EOF
     # 输出Clash格式配置（紧凑格式）
-    echo "    - { name: '$name_yaml', type: ss, server: '$server_yaml', port: $port, cipher: '$method_yaml', password: '$password_yaml', udp: true${extra_flags} }"
+    #echo "    - { name: '$name_yaml', type: ss, server: '$server_yaml', port: $port, cipher: '$method_yaml', password: '$password_yaml', udp: true${extra_flags} }"
     
     PROXY_COUNT=$((PROXY_COUNT + 1))
 }
@@ -418,6 +427,116 @@ EOF
     PROXY_COUNT=$((PROXY_COUNT + 1))
 }
 
+parse_trojan() {
+    # trojan://password@server:port?sni=sni_host&allowInsecure=1&fp=chrome#name
+    local trojan_url="$1"
+    local trojan_content=${trojan_url#trojan://}
+    local trojan_decoded=$(url_decode "$trojan_content")
+
+    local password=$(echo "$trojan_decoded" | cut -d@ -f1)
+    local server_part=$(echo "$trojan_decoded" | cut -d@ -f2)
+    local server=$(echo "$server_part" | cut -d: -f1)
+    local port=$(echo "$server_part" | cut -d: -f2 | cut -d? -f1)
+    local sni=$(echo "$server_part" | cut -d'?' -f2 | cut -d'#' -f1 | tr '&' '\n' | grep '^sni=' | cut -d'=' -f2)
+    local fingerprint=$(echo "$server_part" | sed -n 's/.*[?&]fp=\([^&#]*\).*/\1/p')
+    local name=$(echo "$server_part" | cut -d# -f2 | sed 's/%20/ /g')
+
+    if [ -z "$name" ]; then
+        name="Trojan-${server}-${port}"
+    fi
+
+    # 检查重复名称
+    if [ -f "$TEMP_NAME_FILE" ] && grep -q "^$name$" "$TEMP_NAME_FILE"; then
+        DUPLICATE_COUNT=$((DUPLICATE_COUNT + 1))
+        name="${name}-${DUPLICATE_COUNT}"
+    fi
+    echo "$name" >> "$TEMP_NAME_FILE"
+
+    # 输出Clash格式配置
+    cat << EOF
+  - name: "$name"
+    type: trojan
+    server: $server
+    port: $port
+    password: $password
+    sni: $sni
+    client-fingerprint: $fingerprint
+    skip-cert-verify: true
+EOF
+    PROXY_COUNT=$((PROXY_COUNT + 1))
+}
+
+parse_anytls() {
+    #anytls://password@server:port?security=none&type=tcp&allowInsecure=1&sni=icloud.com&udp=1&insecure=1#name
+    local anytls_url="$1"
+    local anytls_content=${anytls_url#anytls://}
+    local anytls_decoded=$(url_decode "$anytls_content")
+
+    local password=$(echo "$anytls_decoded" | cut -d@ -f1)
+    local server_part=$(echo "$anytls_decoded" | cut -d@ -f2)
+    local server=$(echo "$server_part" | cut -d: -f1)
+    local port=$(echo "$server_part" | cut -d: -f2 | cut -d? -f1)
+    local sni=$(echo "$server_part" | sed -n 's/.*[?&]sni=\([^&#]*\).*/\1/p')
+    local name=$(echo "$server_part" | cut -d# -f2 | sed 's/%20/ /g')
+
+    if [ -z "$name" ]; then
+        name="AnyTLS-${server}-${port}"
+    fi
+    # 检查重复名称
+    if [ -f "$TEMP_NAME_FILE" ] && grep -q "^$name$" "$TEMP_NAME_FILE"; then
+        DUPLICATE_COUNT=$((DUPLICATE_COUNT + 1))
+        name="${name}-${DUPLICATE_COUNT}"
+    fi
+    echo "$name" >> "$TEMP_NAME_FILE"
+
+    # 输出Clash格式配置
+    cat << EOF
+  - name: "$name"
+    type: anytls
+    server: $server
+    port: $port
+    password: $password
+    sni: $sni
+    skip-cert-verify: true
+EOF
+    PROXY_COUNT=$((PROXY_COUNT + 1))
+}
+
+parse_hy2() {
+    # hysteria2://password@server:1234?insecure=1&sni=sni_host#Claw JP[HY2]
+    local hy2_url="$1"
+    local hy2_content=${hy2_url#hysteria2://}
+    local hy2_decoded=$(url_decode "$hy2_content")
+
+    local password=$(echo "$hy2_decoded" | cut -d@ -f1)
+    local server_part=$(echo "$hy2_decoded" | cut -d@ -f2)
+    local server=$(echo "$server_part" | cut -d: -f1)
+    local port=$(echo "$server_part" | cut -d: -f2 | cut -d? -f1)
+    local sni=$(echo "$server_part" | sed -n 's/.*[?&]sni=\([^&#]*\).*/\1/p')
+    local name=$(echo "$server_part" | cut -d# -f2 | sed 's/%20/ /g')
+
+    if [ -z "$name" ]; then
+        name="Hysteria2-${server}-${port}"
+    fi
+    # 检查重复名称
+    if [ -f "$TEMP_NAME_FILE" ] && grep -q "^$name$" "$TEMP_NAME_FILE"; then
+        DUPLICATE_COUNT=$((DUPLICATE_COUNT + 1))
+        name="${name}-${DUPLICATE_COUNT}"
+    fi
+    echo "$name" >> "$TEMP_NAME_FILE"
+
+    # 输出Clash格式配置
+    cat << EOF
+  - name: "$name"
+    type: hysteria2
+    server: $server
+    port: $port
+    password: $password
+    sni: $sni
+    skip-cert-verify: true
+EOF
+}
+
 # 主转换函数
 convert_subscription() {
     local input_file="$1"
@@ -490,6 +609,10 @@ EOF
             parse_vless "$line" >> "$output_file"
         elif [[ "$line" =~ ^vmess:// ]]; then
             parse_vmess "$line" >> "$output_file"
+        elif [[ "$line" =~ ^trojan:// ]]; then
+            parse_trojan "$line" >> "$output_file"
+        elif [[ "$line" =~ ^anytls:// ]]; then
+            parse_anytls "$line" >> "$output_file"
         else
             echo "# 未识别的协议: $line" >> "$unrecognized_file"
         fi
